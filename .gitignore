@@ -1,0 +1,5 @@
+.env
+.secret_key
+brewza.db*
+.venv
+__pycache__

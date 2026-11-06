@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BREWZA — Find your sip</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E☕%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+</head>
+<body data-theme="female">
+<div class="orbs" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+<div class="wrap">
+  <header class="top glass">
+    <div class="logo"><div class="cup">☕</div><b>BREWZA</b></div>
+    <nav id="tabs" role="tablist" aria-label="Main sections">
+      <button class="tab" role="tab" data-tab="home" aria-selected="true"><span class="ic">🏠</span>Home</button>
+      <button class="tab" role="tab" data-tab="chat" aria-selected="false"><span class="ic">💬</span>Live chat</button>
+      <button class="tab" role="tab" data-tab="profile" aria-selected="false"><span class="ic">👤</span>Profile</button>
+    </nav>
+  </header>
+
+  <!-- HOME -->
+  <main>
+  <section id="tab-home">
+    <div class="glass locbar">
+      <div class="locrow">
+        <div><b id="locLabel">📍 Locating…</b><p class="muted" id="locSub"></p></div>
+        <button class="btn ghost" id="changeLoc">Change location</button>
+      </div>
+      <div class="rangeline"><span class="muted">Range</span><input type="range" id="range" min="200" max="10000" step="100" value="2000" aria-label="Search range"><strong id="rangeVal">2 km</strong></div>
+      <div class="toolbar">
+        <input type="search" class="grow" id="q" placeholder="Search these results by name or address…" aria-label="Search results">
+        <button class="btn" id="openFilters">⚙ Apply filters<span class="badge" id="fbadge" hidden>0</span></button>
+        <button class="btn ghost" id="wishToggle" aria-pressed="false">♥ Wishlist <span class="badge" id="wcount" hidden>0</span></button>
+      </div>
+    </div>
+    <div class="glass mapcard"><div id="map" role="application" aria-label="Map of nearby places"></div></div>
+    <div class="glass locbar" style="margin-top:12px">
+      <div class="toolbar"><input type="text" class="grow" id="ask" maxlength="300" placeholder="✨ Ask BREWZA AI: “peaceful café under ₹300 with Wi-Fi”" aria-label="Ask BREWZA AI"><button class="btn" id="askGo">Ask</button></div>
+      <div id="askOut"></div>
+    </div>
+    <p class="status" id="status" aria-live="polite"></p>
+    <div class="cards" id="list"></div>
+  </section>
+
+  <!-- LIVE CHAT -->
+  <section id="tab-chat" hidden>
+    <div class="glass chatwrap">
+      <div>
+        <div class="chips" id="rooms"></div>
+        <p class="muted" style="margin-top:8px"><span id="online">–</span> online in this room · messages are saved · don’t share personal details or exact location</p>
+        <div class="banner" id="chatBanner" hidden></div>
+      </div>
+      <div class="msgs" id="msgs" aria-live="polite"></div>
+      <div class="sendrow"><input type="text" id="chatText" maxlength="300" placeholder="Say hi, ask for a recommendation…" aria-label="Message"><button class="btn" id="chatSend">Send</button></div>
+    </div>
+  </section>
+
+  <!-- PROFILE -->
+  <section id="tab-profile" hidden>
+    <div class="pgrid">
+      <aside class="glass pcard">
+        <div style="display:flex;gap:14px;align-items:center"><div class="avatar" id="avatar">🙂</div><div><h2 id="pName">Guest</h2><p class="muted" id="pSub"></p></div></div>
+        <label class="f">Display name<input type="text" id="nameInput" maxlength="24"></label>
+        <label class="f">Style
+          <div class="gender" id="genderPick" role="radiogroup" aria-label="Gender and theme">
+            <button data-g="female" aria-pressed="false"><span>🌸</span>Female</button>
+            <button data-g="male" aria-pressed="false"><span>🌙</span>Male</button>
+            <button data-g="other" aria-pressed="false"><span>✨</span>Prefer not to say</button>
+          </div>
+        </label>
+        <p class="muted">Female and “prefer not to say” use the pastel glass look. Male uses the midnight blue, black and gold look.</p>
+        <div style="display:grid;gap:8px;margin-top:14px">
+          <button class="btn ghost" id="pLoc">📍 Update my location</button>
+          <button class="btn ghost" id="pClear">🗑 Clear my saved data</button>
+          <button class="btn ghost" id="pLogout">⎋ Log out</button>
+        </div>
+      </aside>
+      <div>
+        <div class="stats" id="stats"></div>
+        <div class="glass pcard" style="margin-bottom:12px"><h3>What you go for</h3><div class="bars" id="bars"></div></div>
+        <div class="glass pcard">
+          <div class="chips" id="ptabs"></div>
+          <div class="list" id="plist"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  </main>
+</div>
+
+<!-- Welcome / location gate -->
+<div class="overlay" id="gate" hidden>
+  <div class="glass gatebox" role="dialog" aria-modal="true" aria-labelledby="gTitle">
+    <button class="x" id="gateX" aria-label="Close" hidden>✕</button>
+    <div id="gstep0">
+      <h2>Welcome to BREWZA ☕</h2>
+      <p class="muted">Create an account so your wishlist, visited places and reviews are saved in the database.</p>
+      <div class="chips" style="margin:12px 0"><button class="chip" data-auth="login" aria-pressed="true">Log in</button><button class="chip" data-auth="signup" aria-pressed="false">Sign up</button></div>
+      <label class="f">Username<input type="text" id="aUser" maxlength="24" autocomplete="username" placeholder="letters, numbers, _ or ."></label>
+      <label class="f" id="aNameWrap" hidden>Display name<input type="text" id="aName" maxlength="24" placeholder="e.g. Riya"></label>
+      <label class="f">Password<input type="password" id="aPass" maxlength="72" autocomplete="current-password" placeholder="at least 8 characters" style="width:100%;font:inherit;color:var(--ink);background:var(--chip);border:1px solid var(--edge);border-radius:14px;padding:11px 13px"></label>
+      <div class="err" id="gerr0" hidden></div>
+      <button class="btn" id="aGo" style="width:100%;margin-top:14px">Log in</button>
+    </div>
+    <div id="gstep1" hidden>
+      <h2 id="gTitle">Pick your style</h2>
+      <p class="muted">You can change this any time in Profile.</p>
+      <label class="f">Display name<input type="text" id="gname" maxlength="24" placeholder="e.g. Riya"></label>
+      <div class="gender" id="gGender">
+        <button data-g="female" aria-pressed="false"><span>🌸</span>Female<br><small>Pastel glass</small></button>
+        <button data-g="male" aria-pressed="false"><span>🌙</span>Male<br><small>Blue, black &amp; gold</small></button>
+        <button data-g="other" aria-pressed="false"><span>✨</span>Prefer not to say<br><small>Pastel glass</small></button>
+      </div>
+      <div class="err" id="gerr1" hidden></div>
+      <button class="btn" id="gnext1" style="width:100%;margin-top:6px">Continue</button>
+    </div>
+    <div id="gstep2" hidden>
+      <h2>Where should we look?</h2>
+      <p class="muted">Your location stays in this browser and is only used to search nearby places.</p>
+      <button class="btn" id="gGeo" style="width:100%;margin-top:14px">📍 Use my precise location</button>
+      <p class="muted" style="text-align:center;margin:12px 0">or type an area, landmark or city</p>
+      <div style="display:flex;gap:8px"><input type="text" id="gArea" placeholder="e.g. Connaught Place, Delhi" aria-label="Area"><button class="btn ghost" id="gAreaGo">Search</button></div>
+      <div class="err" id="gerr2" hidden></div>
+    </div>
+    <div id="gsetup" class="setup" hidden></div>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="overlay" id="filters" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="fTitle">
+    <button class="x" data-close="filters" aria-label="Close">✕</button>
+    <h2 id="fTitle">Filters</h2><p class="muted">Pick what matters, then apply. Nothing is filtered until you do.</p>
+    <div id="fbody"></div>
+    <div class="sheetfoot"><button class="btn ghost" id="fClear">Clear all</button><button class="btn" id="fApply">Apply filters</button></div>
+  </div>
+</div>
+
+<!-- Place detail -->
+<div class="overlay" id="detail" hidden>
+  <div class="sheet" id="dbody" role="dialog" aria-modal="true"></div>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
