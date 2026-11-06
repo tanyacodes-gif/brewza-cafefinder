@@ -1,0 +1,21 @@
+# Optional: Render "Blueprint". Or just fill the same values in the Render dashboard.
+services:
+  - type: web
+    name: brewza-cafe-finder
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 120
+    envVars:
+      - key: BEHIND_PROXY
+        value: "1"
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: OSM_CONTACT
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash

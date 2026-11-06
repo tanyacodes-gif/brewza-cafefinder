@@ -28,14 +28,38 @@ if _env.exists():
         if m and m.group(1) not in os.environ:
             os.environ[m.group(1)] = m.group(2).strip("\"'")
 
-DB_PATH = Path(os.environ.get("DATABASE", BASE / "brewza.db"))
-_sk = BASE / ".secret_key"
-if not _sk.exists():
-    _sk.write_text(secrets.token_hex(32))
+def _data_dir():
+    """Where the database and secret key live. Uses /tmp if the project folder is read-only (e.g. Vercel)."""
+    d = os.environ.get("DATA_DIR")
+    if d:
+        Path(d).mkdir(parents=True, exist_ok=True)
+        return Path(d)
+    try:
+        t = BASE / ".write_test"
+        t.write_text("x")
+        t.unlink()
+        return BASE
+    except OSError:
+        return Path("/tmp")
+
+
+DATA = _data_dir()
+DB_PATH = Path(os.environ.get("DATABASE", DATA / "brewza.db"))
+
+
+def _secret():
+    if os.environ.get("SECRET_KEY"):
+        return os.environ["SECRET_KEY"]
+    f = DATA / ".secret_key"
+    if not f.exists():
+        f.write_text(secrets.token_hex(32))
+    return f.read_text().strip()
+
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 app.config.update(
-    SECRET_KEY=os.environ.get("SECRET_KEY") or _sk.read_text().strip(),
+    SECRET_KEY=_secret(),
+    SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE") == "1",
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 30,
@@ -44,6 +68,10 @@ app.config.update(
 
 # pbkdf2 works on every Python build (the default "scrypt" is missing on some Macs)
 PW_METHOD = "pbkdf2:sha256"
+
+if os.environ.get("BEHIND_PROXY") == "1":     # set on Render/Railway etc.
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 # OpenStreetMap services ask every app to identify itself in the User-Agent.
 UA = "BREWZA-student-project/1.0 (" + (os.environ.get("OSM_CONTACT") or "set OSM_CONTACT in .env") + ")"
