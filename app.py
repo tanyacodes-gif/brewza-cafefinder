@@ -1,5 +1,6 @@
 """BREWZA backend (free stack): Flask + SQLite + OpenStreetMap data + optional Gemini (free tier).
 No Google Maps key needed."""
+import base64
 import json
 import math
 import os
@@ -7,15 +8,17 @@ import re
 import secrets
 import sqlite3
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-from flask import Flask, abort, g, jsonify, request, session
+from flask import Flask, Response, abort, g, jsonify, request, session
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -85,6 +88,7 @@ def db():
         g.db = sqlite3.connect(DB_PATH)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
+        g.db.execute("PRAGMA busy_timeout = 5000")
     return g.db
 
 
@@ -98,6 +102,7 @@ def close_db(_):
 def init_db():
     with sqlite3.connect(DB_PATH) as c:
         c.execute("PRAGMA journal_mode = WAL")
+        c.execute("PRAGMA synchronous = NORMAL")
         c.executescript((BASE / "schema.sql").read_text(encoding="utf-8"))
 
 
@@ -230,7 +235,7 @@ def headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    if request.path.startswith("/api/"):
+    if request.path.startswith("/api/") and not request.path.startswith("/api/photos/"):
         resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -321,7 +326,7 @@ def profile():
 @app.delete("/api/me/data")
 def clear_data():
     u = need_user()
-    for t in ("wishlist", "visits", "reviews"):
+    for t in ("wishlist", "visits", "reviews", "photos"):
         db().execute(f"DELETE FROM {t} WHERE user_id = ?", (u["id"],))
     db().commit()
     return "", 204
@@ -329,8 +334,27 @@ def clear_data():
 
 # ------------------------------------------------------------------ OpenStreetMap: nearby places + geocoding
 KIND_OF = {"cafe": "cafe", "bar": "bar", "pub": "bar", "restaurant": "restaurant"}
-_cache = {}          # (lat, lng, radius) -> (time, places)   (be polite to the free servers)
+_cache = {}          # tile key -> (fetched_at, places, ttl_seconds)
+_refreshing = set()
+STALE_OK = 7 * 86400   # a stale list is still shown instantly while a fresh one loads in the background
 _geo_cache = {}
+
+
+def commons_photo(t):
+    """Real photo of the place IF volunteers tagged one on Wikimedia Commons. Returns (image_url, credit_page)."""
+    name = ""
+    wc = str(t.get("wikimedia_commons", ""))
+    if wc.startswith("File:"):
+        name = wc[5:]
+    else:
+        img = str(t.get("image", ""))
+        if img.startswith("https://commons.wikimedia.org/wiki/File:"):
+            name = urllib.parse.unquote(img.split("File:", 1)[1])
+    name = clean_text(name, 180)
+    if not name or "/" in name:
+        return "", ""
+    return ("https://commons.wikimedia.org/wiki/Special:FilePath/" + urllib.parse.quote(name) + "?width=640",
+            "https://commons.wikimedia.org/wiki/File:" + urllib.parse.quote(name.replace(" ", "_")))
 
 
 def parse_element(el):
@@ -353,8 +377,10 @@ def parse_element(el):
     wifi = None
     if t.get("internet_access") in ("wlan", "yes", "wifi"):
         wifi = "free" if t.get("internet_access:fee") == "no" else "yes"
+    ext, ext_page = commons_photo(t)
     return {
         "id": {"node": "n", "way": "w", "relation": "r"}[el["type"]] + str(el["id"]),
+        "ext": ext, "extPage": ext_page,
         "name": name, "kind": kind, "lat": lat, "lng": lng, "addr": addr,
         "hours": clean_text(t.get("opening_hours"), 300),
         "phone": clean_text(t.get("phone") or t.get("contact:phone"), 40),
@@ -380,19 +406,40 @@ def meters(lat1, lng1, lat2, lng2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _overpass_once(url, q):
+    return http_json(url, data=urllib.parse.urlencode({"data": q}).encode(), timeout=20)
+
+
 def overpass_search(lat, lng, rad):
-    """Fast bounding-box query with exact tag matches. Returns list of places, or None if every server failed."""
+    """Bounding-box query, exact tag matches. Hedged: server #2 is only asked if #1 hasn't answered after 4 s
+    (fast for you, polite to the free servers). Returns a list, or None if every server failed."""
     s_, w_, n_, e_ = bbox(lat, lng, rad)
     stmts = "".join(f'node["amenity"="{a}"]["name"];way["amenity"="{a}"]["name"];' for a in ("cafe", "bar", "pub", "restaurant"))
     q = f"[out:json][timeout:15][bbox:{s_:.6f},{w_:.6f},{n_:.6f},{e_:.6f}];({stmts});out center tags 250;"
-    for url in OVERPASS:
-        try:
-            data = http_json(url, data=urllib.parse.urlencode({"data": q}).encode(), timeout=15)
-            found = [p for p in (parse_element(el) for el in data.get("elements", [])) if p]
-            return [p for p in found if meters(lat, lng, p["lat"], p["lng"]) <= rad * 1.02]
-        except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
-            app.logger.warning("Overpass %s failed: %s", url, why(e))
-    return None
+    ex = ThreadPoolExecutor(max_workers=len(OVERPASS))
+    futs, nxt, deadline = {}, 0, time.time() + 32
+    try:
+        while time.time() < deadline:
+            if nxt < len(OVERPASS):
+                futs[ex.submit(_overpass_once, OVERPASS[nxt], q)] = OVERPASS[nxt]
+                nxt += 1
+            if not futs:
+                if nxt >= len(OVERPASS):
+                    break
+                continue
+            done, _ = wait(list(futs), timeout=4 if nxt < len(OVERPASS) else max(0.1, deadline - time.time()), return_when=FIRST_COMPLETED)
+            for f in done:
+                url = futs.pop(f)
+                try:
+                    data = f.result()
+                except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+                    app.logger.warning("Overpass %s failed: %s", url, why(e))
+                    continue
+                found = [p for p in (parse_element(el) for el in data.get("elements", [])) if p]
+                return [p for p in found if meters(lat, lng, p["lat"], p["lng"]) <= rad * 1.02]
+        return None
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def nominatim_search(lat, lng, rad):
@@ -422,6 +469,63 @@ def nominatim_search(lat, lng, rad):
     return out
 
 
+def tile_key(lat, lng, rad):
+    """Snap the search to a grid tile so everyone in the same area shares ONE cached result."""
+    step = 0.01 if rad <= 2000 else 0.02 if rad <= 5000 else 0.05
+    cl, cg = round(lat / step) * step, round(lng / step) * step
+    fr = min(12000, math.ceil((rad + step * 111320 * 0.75) / 500) * 500)
+    return (step, round(cl, 4), round(cg, 4), fr)
+
+
+def fetch_tile(cl, cg, fr):
+    found = overpass_search(cl, cg, fr)
+    if found is not None:
+        return found, 6 * 3600
+    try:                                           # backup source: fewer places, so re-check sooner
+        return nominatim_search(cl, cg, fr), 900
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+        app.logger.warning("Nominatim backup failed: %s", why(e))
+        return None, 0
+
+
+def _store(key, found, ttl):
+    if len(_cache) >= 100:
+        _cache.pop(min(_cache, key=lambda k: _cache[k][0]), None)
+    _cache[key] = (time.time(), found, ttl)
+
+
+def _refresh(key):
+    try:
+        found, ttl = fetch_tile(key[1], key[2], key[3])
+        if found is not None:
+            _store(key, found, ttl)
+    except Exception as e:                         # a background refresh must never crash the server
+        app.logger.warning("Background refresh failed: %s", why(e))
+    finally:
+        _refreshing.discard(key)
+
+
+def get_places(lat, lng, rad):
+    key = tile_key(lat, lng, rad)
+    hit, now = _cache.get(key), time.time()
+    if hit and now - hit[0] < hit[2]:
+        found = hit[1]                                         # fresh: instant
+    elif hit and now - hit[0] < STALE_OK:
+        found = hit[1]                                         # stale: instant now, refresh in background
+        if key not in _refreshing:
+            _refreshing.add(key)
+            threading.Thread(target=_refresh, args=(key,), daemon=True).start()
+    else:
+        found, ttl = fetch_tile(key[1], key[2], key[3])
+        if found is None and hit:
+            found = hit[1]
+        elif found is None:
+            abort(502, "The free map servers are too busy right now (timeout). Try again in a minute, or use a smaller range.")
+        else:
+            _store(key, found, ttl)
+    return [p for p in found if meters(lat, lng, p["lat"], p["lng"]) <= rad * 1.02]
+
+
 @app.get("/api/places/nearby")
 def nearby():
     u = need_user()
@@ -429,29 +533,11 @@ def nearby():
     rad = num(request.args.get("radius"), 100, 10000, int)
     if lat is None or lng is None or rad is None:
         abort(400, "Need lat, lng and radius (100-10000 m)")
-    if limited(f"near:{u['id']}", 20, 60):
+    if limited(f"near:{u['id']}", 30, 60):
         abort(429, "Too many searches, wait a moment")
-    key = (round(lat, 3), round(lng, 3), round(rad / 100))
-    hit = _cache.get(key)
-    if hit and time.time() - hit[0] < 600:
-        found = hit[1]
-    else:
-        found, errors = overpass_search(lat, lng, rad), []
-        if found is None:                                   # main servers failed -> try the backup source
-            try:
-                found = nominatim_search(lat, lng, rad)
-            except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
-                app.logger.warning("Nominatim backup failed: %s", why(e))
-                found = None
-        if found is None and hit:                           # everything failed -> reuse older results if we have them
-            found = hit[1]
-        if found is None:
-            abort(502, "The free map servers are too busy right now (timeout). Try again in a minute, or use a smaller range.")
-        if len(_cache) > 200:
-            _cache.clear()
-        _cache[key] = (time.time(), found)
+    found = get_places(lat, lng, rad)
     ids = [p["id"] for p in found]
-    stats, pop = {}, {}
+    stats, pop, photo = {}, {}, {}
     for i in range(0, len(ids), 500):
         chunk = ids[i:i + 500]
         ph = ",".join("?" * len(chunk))
@@ -460,12 +546,15 @@ def nearby():
         for tbl in ("wishlist", "visits"):
             for r in db().execute(f"SELECT place_id, COUNT(*) n FROM {tbl} WHERE place_id IN ({ph}) GROUP BY place_id", chunk):
                 pop[r["place_id"]] = pop.get(r["place_id"], 0) + r["n"]
+        for r in db().execute(f"""SELECT place_id, MAX(id) pid FROM photos WHERE place_id IN ({ph})
+                                  AND (SELECT COUNT(*) FROM photo_reports x WHERE x.photo_id=photos.id) < 3 GROUP BY place_id""", chunk):
+            photo[r["place_id"]] = r["pid"]
     out = []
     for p in found:
-        s = stats.get(p["id"])
-        out.append(p | {"rating": round(s["a"], 1) if s else 0, "count": s["n"] if s else 0,
-                        "spend": round(s["s"]) if s and s["s"] else None,
-                        "pop": pop.get(p["id"], 0) + (s["n"] if s else 0)})
+        s_ = stats.get(p["id"])
+        out.append(p | {"rating": round(s_["a"], 1) if s_ else 0, "count": s_["n"] if s_ else 0,
+                        "spend": round(s_["s"]) if s_ and s_["s"] else None,
+                        "pop": pop.get(p["id"], 0) + (s_["n"] if s_ else 0), "photo": photo.get(p["id"])})
     return jsonify(places=out)
 
 
@@ -531,6 +620,26 @@ def visit_del(pid):
 
 
 # ------------------------------------------------------------------ reviews
+PHOTO_URL = re.compile(r"^/api/photos/(\d+)$")
+
+
+def photo_bytes(v):
+    """Validate a browser-resized JPEG sent as a data URL and return the raw bytes."""
+    if not (isinstance(v, str) and v.startswith("data:image/jpeg;base64,") and len(v) <= 700_000):
+        abort(400, "Photo must be a small JPEG")
+    try:
+        raw = base64.b64decode(v.split(",", 1)[1], validate=True)
+    except Exception:
+        abort(400, "Couldn’t read that photo")
+    if not raw.startswith(b"\xff\xd8\xff") or len(raw) > 500_000:
+        abort(400, "Photo must be a JPEG under 500 KB")
+    return raw
+
+
+def store_photo(user_id, place_id, raw):
+    return db().execute("INSERT INTO photos(place_id,user_id,data) VALUES(?,?,?)", (place_id, user_id, raw)).lastrowid
+
+
 @app.post("/api/reviews")
 def review_add():
     u, d = need_user(), body()
@@ -543,23 +652,73 @@ def review_add():
         abort(400, "Write at least 5 characters")
     if d.get("spend") not in (None, "") and spend is None:
         abort(400, "Spend must be between ₹10 and ₹20000")
-    photo = d.get("photo")
-    if photo is not None and not (isinstance(photo, str) and photo.startswith("data:image/jpeg;base64,") and len(photo) <= 400_000):
-        abort(400, "Photo must be a small JPEG")
+    raw = photo_bytes(d["photo"]) if d.get("photo") else None
     if limited(f"rev:{u['id']}", 10, 3600):
         abort(429, "Too many reviews this hour")
     pid = save_place(d.get("place"))
+    photo = f"/api/photos/{store_photo(u['id'], pid, raw)}" if raw else None
     cur = db().execute("INSERT INTO reviews(user_id,place_id,stars,spend,body,photo) VALUES(?,?,?,?,?,?)", (u["id"], pid, stars, spend, text, photo))
     db().execute("INSERT OR IGNORE INTO visits(user_id,place_id) VALUES(?,?)", (u["id"], pid))
     db().commit()
     row = db().execute("SELECT created_at FROM reviews WHERE id=?", (cur.lastrowid,)).fetchone()
-    return jsonify(rid=cur.lastrowid, ts=ms(row["created_at"])), 201
+    return jsonify(rid=cur.lastrowid, ts=ms(row["created_at"]), photo=photo), 201
 
 
 @app.delete("/api/reviews/<int:rid>")
 def review_del(rid):
     u = need_user()
-    db().execute("DELETE FROM reviews WHERE id=? AND user_id=?", (rid, u["id"]))
+    r = db().execute("SELECT photo FROM reviews WHERE id=? AND user_id=?", (rid, u["id"])).fetchone()
+    if r:
+        m = PHOTO_URL.match(r["photo"] or "")
+        if m:
+            db().execute("DELETE FROM photos WHERE id=? AND user_id=?", (int(m.group(1)), u["id"]))
+        db().execute("DELETE FROM reviews WHERE id=? AND user_id=?", (rid, u["id"]))
+        db().commit()
+    return "", 204
+
+
+# ---- community photo gallery ----
+@app.get("/api/photos/<int:pid>")
+def photo_get(pid):
+    r = db().execute("SELECT data FROM photos WHERE id=? AND (SELECT COUNT(*) FROM photo_reports x WHERE x.photo_id=photos.id) < 3", (pid,)).fetchone()
+    if not r:
+        abort(404, "No such photo")
+    return Response(r["data"], mimetype="image/jpeg", headers={"Cache-Control": "public, max-age=604800, immutable"})
+
+
+@app.get("/api/places/<pid>/photos")
+def place_photos(pid):
+    if not PID_RE.match(pid):
+        abort(400, "Invalid place")
+    rows = db().execute("""SELECT id FROM photos WHERE place_id=?
+                           AND (SELECT COUNT(*) FROM photo_reports x WHERE x.photo_id=photos.id) < 3
+                           ORDER BY id DESC LIMIT 12""", (pid,)).fetchall()
+    return jsonify(photos=[r["id"] for r in rows])
+
+
+@app.post("/api/places/<pid>/photos")
+def photo_add(pid):
+    u, d = need_user(), body()
+    if not PID_RE.match(pid):
+        abort(400, "Invalid place")
+    raw = photo_bytes(d.get("photo"))
+    if limited(f"photo:{u['id']}", 10, 3600):
+        abort(429, "Too many photos this hour")
+    place = d.get("place")
+    if not isinstance(place, dict) or place.get("id") != pid:
+        abort(400, "Invalid place")
+    save_place(place)
+    new_id = store_photo(u["id"], pid, raw)
+    db().commit()
+    return jsonify(id=new_id), 201
+
+
+@app.post("/api/photos/<int:pid>/report")
+def photo_report(pid):
+    u = need_user()
+    if not db().execute("SELECT 1 FROM photos WHERE id=?", (pid,)).fetchone():
+        abort(404, "No such photo")
+    db().execute("INSERT OR IGNORE INTO photo_reports(photo_id,user_id) VALUES(?,?)", (pid, u["id"]))
     db().commit()
     return "", 204
 
@@ -611,7 +770,9 @@ def review_report(rid):
 
 
 # ------------------------------------------------------------------ live chat
-_seen = {}
+_seen = {}          # room -> {user_id: last_seen_time}   (presence; lives in memory)
+_posts = 0
+NEAR_RE = re.compile(r"^near:-?\d{1,5}:-?\d{1,5}$")
 
 
 def room_arg(v):
@@ -621,32 +782,72 @@ def room_arg(v):
     return v
 
 
+def parse_cell(v):
+    """'ci,cj' = which ~1 km grid square the person is in (their exact position is never sent)."""
+    try:
+        ci, cj = (int(x) for x in str(v).split(","))
+    except ValueError:
+        return None
+    return (ci, cj) if abs(ci) <= 9000 and abs(cj) <= 18000 else None
+
+
+def near_rooms(ci, cj):
+    return [f"near:{ci + a}:{cj + b}" for a in (-1, 0, 1) for b in (-1, 0, 1)]   # own square + 8 neighbours (~2-3 km)
+
+
 @app.get("/api/chat")
 def chat_get():
     u = need_user()
-    room = room_arg(request.args.get("room"))
+    cell = parse_cell(request.args["cell"]) if request.args.get("cell") else None
+    if request.args.get("cell") and not cell:
+        abort(400, "Invalid cell")
+    rooms = near_rooms(*cell) if cell else [room_arg(request.args.get("room"))]
+    own = f"near:{cell[0]}:{cell[1]}" if cell else rooms[0]
     after = num(request.args.get("after", 0), 0, 10**12, int, 0)
     now = time.time()
-    seen = _seen.setdefault(room, {})
-    seen[u["id"]] = now
-    online = sum(1 for t in seen.values() if now - t < 8)
+    _seen.setdefault(own, {})[u["id"]] = now
+    online = len({uid for r in rooms for uid, t in _seen.get(r, {}).items() if now - t < 12})
+    ph = ",".join("?" * len(rooms))
+    base = (f"SELECT m.* FROM chat_messages m WHERE m.room IN ({ph}) AND m.id > ? "
+            "AND NOT EXISTS(SELECT 1 FROM chat_reports r WHERE r.message_id=m.id AND r.user_id=?) "
+            "AND (SELECT COUNT(*) FROM chat_reports r WHERE r.message_id=m.id) < 3")
+    args = (*rooms, after, u["id"])
     if after == 0:
-        rows = db().execute("SELECT * FROM (SELECT * FROM chat_messages WHERE room=? ORDER BY id DESC LIMIT 50) ORDER BY id", (room,)).fetchall()
+        rows = db().execute(f"SELECT * FROM ({base} ORDER BY m.id DESC LIMIT 50) ORDER BY id", args).fetchall()
     else:
-        rows = db().execute("SELECT * FROM chat_messages WHERE room=? AND id>? ORDER BY id LIMIT 100", (room, after)).fetchall()
+        rows = db().execute(f"{base} ORDER BY m.id LIMIT 100", args).fetchall()
     return jsonify(online=online, messages=[{"id": r["id"], "uid": r["user_id"], "name": r["name"], "text": r["body"], "ts": ms(r["created_at"])} for r in rows])
 
 
 @app.post("/api/chat")
 def chat_post():
+    global _posts
     u, d = need_user(), body()
     room = room_arg(d.get("room"))
+    if room.startswith("near:") and not NEAR_RE.match(room):
+        abort(400, "Invalid room")
     text = clean_text(d.get("text"), 300)
     if not text:
         abort(400, "Empty message")
     if limited(f"chat:{u['id']}", 1, 0.7):
         abort(429, "Slow down a little")
     db().execute("INSERT INTO chat_messages(room,user_id,name,body) VALUES(?,?,?,?)", (room, u["id"], u["display_name"], text))
+    _posts += 1
+    if _posts % 100 == 0:                      # keep the table small: drop messages older than 7 days
+        db().execute("DELETE FROM chat_messages WHERE created_at < datetime('now','-7 days')")
+    db().commit()
+    return "", 204
+
+
+@app.post("/api/chat/<int:mid>/report")
+def chat_report(mid):
+    u = need_user()
+    m = db().execute("SELECT user_id FROM chat_messages WHERE id=?", (mid,)).fetchone()
+    if not m:
+        abort(404, "Message not found")
+    if m["user_id"] == u["id"]:
+        abort(400, "You can’t report your own message")
+    db().execute("INSERT OR IGNORE INTO chat_reports(message_id,user_id) VALUES(?,?)", (mid, u["id"]))
     db().commit()
     return "", 204
 

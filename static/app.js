@@ -7,6 +7,8 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, m => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]));
 const KINDS = { cafe: { label: "Café", em: "☕" }, bar: { label: "Bar", em: "🍸" }, restaurant: { label: "Restaurant", em: "🍽️" } };
+const okImg = s => !!s && (/^\/api\/photos\/\d+$/.test(s) || s.startsWith("data:image/jpeg;base64,"));
+const photoOf = p => p.photo ? "/api/photos/" + p.photo : (p.ext || "");   // community photo first, else Wikimedia photo if tagged
 const BANDS = { "100-300": [100, 300], "300-500": [300, 500], "500-99999": [500, 99999] };
 
 /* ---------------- API ---------------- */
@@ -143,18 +145,29 @@ function drawMap(items) {
 }
 
 /* ---------------- Places (from backend → OpenStreetMap) ---------------- */
+const PKEY = "brewza.places.v1";   // last results are kept in this browser so the list appears instantly next time
 async function fetchPlaces() {
   if (!db.loc) return;
-  const my = ++reqId;
-  $("#status").textContent = "Searching near you…";
-  $("#list").innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  const my = ++reqId, key = `${db.loc.lat.toFixed(3)},${db.loc.lng.toFixed(3)},${db.profile.range}`;
+  let shown = false;
+  try {
+    const c = JSON.parse(localStorage.getItem(PKEY) || "null");
+    if (c && c.key === key && Date.now() - c.ts < 864e5) { places = c.places.map(p => ({ ...p, open: openNow(p.hours) })); render(); shown = true; $("#status").textContent += " · updating…"; }
+  } catch (e) { }
+  if (!shown) {
+    $("#status").textContent = "Searching near you… (the first search in a new area can take a few seconds)";
+    $("#list").innerHTML = '<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>';
+  }
   try {
     const d = await api(`/places/nearby?lat=${db.loc.lat}&lng=${db.loc.lng}&radius=${Math.min(10000, Math.max(100, db.profile.range))}`);
     if (my !== reqId) return;
     places = d.places.map(p => ({ ...p, open: openNow(p.hours) }));
     render();
+    try { localStorage.setItem(PKEY, JSON.stringify({ key, ts: Date.now(), places: d.places.slice(0, 150) })); } catch (e) { }
   } catch (e) {
-    $("#list").innerHTML = `<div class="glass empty">Couldn’t load places.<br><small>${esc(e.message)}</small></div>`;
+    if (my !== reqId) return;
+    if (shown) { $("#status").textContent = "Showing saved results (couldn’t refresh: " + e.message + ")"; return; }
+    $("#list").innerHTML = `<div class="glass empty">Couldn’t load places.<br><small>${esc(e.message)}</small><br><br><button class="btn" id="retryPlaces">Try again</button></div>`;
     $("#status").textContent = "";
   }
 }
@@ -193,7 +206,7 @@ function cardHTML(p) {
   const tags = [k.label, p.count ? `★ ${p.rating.toFixed(1)} (${p.count})` : "No reviews yet", p.spend ? `~₹${p.spend}/person` : "", ...tagsOf(p).slice(0, 3)].filter(Boolean).map(t => `<span>${esc(t)}</span>`).join("");
   const open = p.open === true ? '<span class="ok">Open now</span>' : p.open === false ? '<span class="no">Closed</span>' : '<span class="muted">Hours unknown</span>';
   return `<article class="glass card">
-   <div class="thumb">${k.em}</div>
+   <div class="thumb"><span>${k.em}</span>${photoOf(p) ? `<img src="${esc(photoOf(p))}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ""}</div>
    <div class="cb">
     <div class="row"><h3><button class="lnk" data-open="${esc(p.id)}">${esc(p.name)}</button></h3></div>
     <p class="muted">${fmtDist(p.d)} · ${travel(p.d)} · ${open}</p>
@@ -246,7 +259,7 @@ async function openDetail(id) {
     if (!it) it = { ...s, hours: "", phone: "", website: "", rating: 0, count: 0 };
   }
   current = { ...it, d: distOf(it) };
-  renderDetail(); $("#detail").hidden = false; loadCommunity();
+  renderDetail(); $("#detail").hidden = false; loadCommunity(); loadGallery();
 }
 let rv = { stars: 0, photo: null };
 function renderDetail() {
@@ -254,10 +267,12 @@ function renderDetail() {
   let site = ""; try { if (p.website && /^https?:$/.test(new URL(p.website).protocol)) site = p.website; } catch (e) { }
   const tags = tagsOf(p);
   $("#dbody").innerHTML = `<button class="x" data-close="detail" aria-label="Close">✕</button>
-   <div class="hero">${k.em}</div>
+   <div class="hero" id="dHero"><span>${k.em}</span>${photoOf(p) ? `<img src="${esc(photoOf(p))}" alt="Photo of ${esc(p.name)}" referrerpolicy="no-referrer" onerror="this.remove()">` : ""}</div>
    <h2>${esc(p.name)}</h2>
    <p class="muted">${k.label} · ${p.count ? `<span class="star">${stars(p.rating)}</span> ${p.rating.toFixed(1)} (${p.count} BREWZA review${p.count > 1 ? "s" : ""})` : "No BREWZA reviews yet"}${p.spend ? ` · ~₹${p.spend}/person` : ""} · ${fmtDist(p.d)} · ${travel(p.d)}</p>
    <div class="acts" style="margin:12px 0" id="dActs"></div>
+   <div class="gallery" id="dGallery"></div>
+   ${p.ext ? `<p class="muted">Cover photo: <a href="${esc(p.extPage || "https://commons.wikimedia.org")}" target="_blank" rel="noopener noreferrer">Wikimedia Commons</a> (check the page for credit and license).</p>` : ""}
    <div class="info">
     <div><b>Address</b>${esc(p.addr || "Not listed")}</div>
     <div><b>Hours</b>${p.hours ? esc(p.hours) : "Not listed"}<br>${p.open === true ? '<span class="ok">Open now</span>' : p.open === false ? '<span class="no">Closed now</span>' : ""}</div>
@@ -293,7 +308,7 @@ async function loadCommunity() {
     if (!current || current.id !== id || !$("#dCommunity")) return;
     $("#dAvg").textContent = d.count ? `· ★ ${d.avg} from ${d.count}${d.spend ? ` · avg ₹${d.spend}/person` : ""}` : "";
     box.innerHTML = d.reviews.map(r => `<div class="rev"><b>${esc(r.name)}${r.mine ? " (you)" : ""}</b> <span class="star">${stars(r.stars)}</span> <small>${new Date(r.ts).toLocaleDateString()}${r.spend ? " · spent ₹" + r.spend : ""}</small><br>${esc(r.text)}
-      ${r.photo && r.photo.startsWith("data:image/jpeg;base64,") ? `<br><img src="${esc(r.photo)}" alt="Review photo" style="max-width:160px;border-radius:12px;margin-top:6px">` : ""}
+      ${okImg(r.photo) ? `<br><img src="${esc(r.photo)}" alt="Review photo" style="max-width:160px;border-radius:12px;margin-top:6px">` : ""}
       <div class="acts">${r.mine ? `<span class="muted">👍 ${r.likes}</span>` : `<button data-like="${r.rid}" class="${r.liked ? "on" : ""}">👍 Helpful · ${r.likes}</button><button data-report="${r.rid}">⚑ Report</button>`}</div></div>`).join("") || '<p class="muted">No reviews yet. Be the first!</p>';
   } catch (e) { box.innerHTML = `<p class="muted">Couldn’t load reviews (${esc(e.message)}).</p>`; }
 }
@@ -322,10 +337,33 @@ function refreshAfterChange() {
   if (!$("#detail").hidden && current) drawDetailActs();
   refreshCounts();
 }
-function shrink(file, cb) {
+function shrink(file, cb, m = 480, q = .7) {
   const rd = new FileReader();
-  rd.onload = () => { const im = new Image(); im.onload = () => { const m = 480, s = Math.min(1, m / Math.max(im.width, im.height)), cv = document.createElement("canvas"); cv.width = im.width * s; cv.height = im.height * s; cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height); cb(cv.toDataURL("image/jpeg", .7)); }; im.onerror = () => toast("Couldn’t read that image"); im.src = rd.result; };
+  rd.onload = () => { const im = new Image(); im.onload = () => { const s = Math.min(1, m / Math.max(im.width, im.height)), cv = document.createElement("canvas"); cv.width = im.width * s; cv.height = im.height * s; cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height); cb(cv.toDataURL("image/jpeg", q)); }; im.onerror = () => toast("Couldn’t read that image"); im.src = rd.result; };
   rd.readAsDataURL(file);
+}
+async function loadGallery() {
+  const box = $("#dGallery"); if (!box || !current) return;
+  const id = current.id, add = `<label class="gadd">📷 Add photo<input type="file" id="pFile" accept="image/*" hidden></label>`;
+  try {
+    const d = await api("/places/" + encodeURIComponent(id) + "/photos");
+    if (!current || current.id !== id || !$("#dGallery")) return;
+    box.innerHTML = d.photos.map(n => `<div class="gimg"><img src="/api/photos/${n}" alt="Photo of ${esc(current.name)}" loading="lazy"><button data-reportphoto="${n}" title="Report this photo" aria-label="Report photo">⚑</button></div>`).join("") + add;
+    if (d.photos.length) {   // newest community photo becomes the cover
+      const hero = $("#dHero"); if (hero) { hero.querySelector("img")?.remove(); hero.insertAdjacentHTML("beforeend", `<img src="/api/photos/${d.photos[0]}" alt="Photo of ${esc(current.name)}">`); }
+    }
+  } catch (e) { box.innerHTML = add; }
+}
+async function uploadPlacePhoto(file) {
+  if (!current) return;
+  toast("Uploading photo…");
+  shrink(file, async data => {
+    try {
+      const r = await api("/places/" + encodeURIComponent(current.id) + "/photos", "POST", { place: snap(current), photo: data });
+      const pl = places.find(x => x.id === current.id); if (pl) pl.photo = r.id;
+      toast("Photo added 📷"); loadGallery(); if (S.tab === "home") render();
+    } catch (e) { toast(e.message); }
+  }, 900, .75);
 }
 async function postReview() {
   const text = $("#rText").value.trim(), sp = $("#rSpend").value.trim();
@@ -334,11 +372,11 @@ async function postReview() {
   try {
     const spend = sp ? +sp : null;
     const r = await api("/reviews", "POST", { place: snap(current), stars: rv.stars, spend, text, photo: rv.photo });
-    db.reviews.unshift({ rid: r.rid, placeId: current.id, name: current.name, kind: current.kind, addr: current.addr, lat: current.lat, lng: current.lng, stars: rv.stars, spend, text, photo: rv.photo, ts: r.ts });
+    db.reviews.unshift({ rid: r.rid, placeId: current.id, name: current.name, kind: current.kind, addr: current.addr, lat: current.lat, lng: current.lng, stars: rv.stars, spend, text, photo: r.photo || null, ts: r.ts });
     if (!visitedRec(current.id)) db.visited.unshift({ ...snap(current), ts: r.ts });
     const pl = places.find(x => x.id === current.id);   // update local stats so lists reflect it right away
-    if (pl) { const n = pl.count + 1; pl.rating = Math.round(((pl.rating * pl.count) + rv.stars) / n * 10) / 10; pl.count = n; if (spend) pl.spend = pl.spend ? Math.round((pl.spend * (n - 1) + spend) / n) : spend; current = { ...current, rating: pl.rating, count: pl.count, spend: pl.spend }; }
-    renderDetail(); loadCommunity(); refreshAfterChange(); toast("Review posted ☕");
+    if (pl) { const n = pl.count + 1; pl.rating = Math.round(((pl.rating * pl.count) + rv.stars) / n * 10) / 10; pl.count = n; if (spend) pl.spend = pl.spend ? Math.round((pl.spend * (n - 1) + spend) / n) : spend; current = { ...current, rating: pl.rating, count: pl.count, spend: pl.spend }; if (r.photo) pl.photo = +r.photo.split("/").pop(); }
+    renderDetail(); loadCommunity(); loadGallery(); refreshAfterChange(); toast("Review posted ☕");
   } catch (e) { toast(e.message); }
 }
 
@@ -377,50 +415,65 @@ function renderProfile() {
   let html = "";
   const meta = p => `${esc((KINDS[p.kind] || KINDS.restaurant).label)} · ${esc(p.addr || "")}`;
   if (S.ptab === "visited") html = db.visited.slice().sort((a, b) => b.ts - a.ts).map(v => `<div class="glass item"><div><h4><button class="lnk" data-open="${esc(v.id)}">${esc(v.name)}</button></h4><p class="muted">${meta(v)}</p><p class="muted">Visited ${new Date(v.ts).toLocaleDateString()}${db.reviews.some(r => r.placeId === v.id) ? " · reviewed ✓" : ""}</p></div><div class="acts"><button data-open="${esc(v.id)}">Review</button><button data-unvisit="${esc(v.id)}">Remove</button></div></div>`).join("");
-  if (S.ptab === "reviews") html = db.reviews.slice().sort((a, b) => b.ts - a.ts).map(r => `<div class="glass item"><div><h4><button class="lnk" data-open="${esc(r.placeId)}">${esc(r.name)}</button></h4><p><span class="star">${stars(r.stars)}</span> <small class="muted">${new Date(r.ts).toLocaleDateString()}${r.spend ? " · spent ₹" + r.spend : ""}</small></p><p style="margin:4px 0;font-size:14px">${esc(r.text)}</p>${r.photo && r.photo.startsWith("data:image/jpeg;base64,") ? `<img src="${esc(r.photo)}" alt="Your photo">` : ""}</div><div class="acts"><button data-delrev="${r.rid}">Delete</button></div></div>`).join("");
+  if (S.ptab === "reviews") html = db.reviews.slice().sort((a, b) => b.ts - a.ts).map(r => `<div class="glass item"><div><h4><button class="lnk" data-open="${esc(r.placeId)}">${esc(r.name)}</button></h4><p><span class="star">${stars(r.stars)}</span> <small class="muted">${new Date(r.ts).toLocaleDateString()}${r.spend ? " · spent ₹" + r.spend : ""}</small></p><p style="margin:4px 0;font-size:14px">${esc(r.text)}</p>${okImg(r.photo) ? `<img src="${esc(r.photo)}" alt="Your photo">` : ""}</div><div class="acts"><button data-delrev="${r.rid}">Delete</button></div></div>`).join("");
   if (S.ptab === "wish") html = db.wish.map(w => `<div class="glass item"><div><h4><button class="lnk" data-open="${esc(w.id)}">${esc(w.name)}</button></h4><p class="muted">${meta(w)}</p></div><div class="acts"><button data-open="${esc(w.id)}">Details</button><button data-wish="${esc(w.id)}">Remove</button></div></div>`).join("");
   $("#plist").innerHTML = html || `<p class="muted">${{ visited: "No visited places yet. Open a place and tap “I’ve been here”.", reviews: "No reviews yet. Open a place and write one.", wish: "Your wishlist is empty." }[S.ptab]}</p>`;
 }
 
-/* ---------------- Chat (saved in the database; browser polls every 2 s) ---------------- */
-const Chat = { room: "lounge", place: null, timer: null, last: 0 };
+/* ---------------- Chat: people nearby (~1 km grid squares), city, lounge, and per-place rooms ---------------- */
+const Chat = { room: "near", place: null, timer: null, last: 0, quiet: 0 };
+let chatGen = 0;
+const CELL = 0.01;   // ≈ 1.1 km. For chat only this coarse square number is sent, never your exact position.
+const myCell = () => db.loc ? [Math.floor(db.loc.lat / CELL), Math.floor(db.loc.lng / CELL)] : null;
 function areaRoom() { return db.loc ? `area:${db.loc.lat.toFixed(1)},${db.loc.lng.toFixed(1)}` : "lounge"; }
 function roomList() {
-  const r = [{ id: "lounge", label: "🌍 Lounge" }];
-  if (db.loc) r.push({ id: areaRoom(), label: "📍 Around you" });
+  const r = [];
+  if (db.loc) r.push({ id: "near", label: "📍 Nearby (~2 km)" });
+  r.push({ id: "lounge", label: "🌍 Lounge" });
+  if (db.loc) r.push({ id: areaRoom(), label: "🏙 City" });
   if (Chat.place) r.push({ id: "place:" + Chat.place.id, label: "💬 " + Chat.place.name });
   return r;
 }
 function drawRooms() { $("#rooms").innerHTML = roomList().map(r => `<button class="chip" data-room="${esc(r.id)}" aria-pressed="${Chat.room === r.id}">${esc(r.label)}</button>`).join(""); }
+function chatQuery() { return Chat.room === "near" ? `cell=${myCell().join(",")}` : `room=${encodeURIComponent(Chat.room)}`; }
+function chatSendRoom() { return Chat.room === "near" ? `near:${myCell()[0]}:${myCell()[1]}` : Chat.room; }
 function addMsg(m) {
-  const box = $("#msgs"), d = document.createElement("div");
-  d.className = "msg" + (db.user && m.uid === db.user.id ? " me" : "");
+  const box = $("#msgs"), d = document.createElement("div"), mine = db.user && m.uid === db.user.id;
+  d.className = "msg" + (mine ? " me" : "");
   const s = document.createElement("small"); s.textContent = `${m.name} · ${new Date(m.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
-  const t = document.createElement("div"); t.textContent = m.text;
+  if (!mine) { const b = document.createElement("button"); b.className = "rep"; b.textContent = "⚑"; b.title = "Report this message"; b.setAttribute("aria-label", "Report message"); b.dataset.reportmsg = m.id; s.append(" ", b); }
+  const t = document.createElement("div"); t.textContent = m.text;   // textContent => no HTML injection
   d.append(s, t); box.append(d);
   while (box.children.length > 150) box.firstChild.remove();
   box.scrollTop = box.scrollHeight;
 }
-async function pollChat() {
-  if (S.tab !== "chat") return;
-  const room = Chat.room;
-  try {
-    const d = await api(`/chat?room=${encodeURIComponent(room)}&after=${Chat.last}`);
-    if (room !== Chat.room) return;
-    d.messages.forEach(addMsg);
-    if (d.messages.length) Chat.last = d.messages[d.messages.length - 1].id;
-    $("#online").textContent = d.online;
-  } catch (e) { if (e.status === 401) location.reload(); }
+/* Polling that backs off when it's quiet (2 s -> 4 s -> 8 s) and pauses while the tab is hidden: far fewer requests per user. */
+async function pollChat(gen = chatGen) {
+  if (gen !== chatGen || S.tab !== "chat") return;
+  if (!document.hidden) {
+    try {
+      const d = await api(`/chat?${chatQuery()}&after=${Chat.last}`);
+      if (gen !== chatGen) return;
+      d.messages.forEach(addMsg);
+      if (d.messages.length) { Chat.last = d.messages[d.messages.length - 1].id; Chat.quiet = 0; } else Chat.quiet++;
+      $("#online").textContent = d.online;
+    } catch (e) { if (e.status === 401) { location.reload(); return; } Chat.quiet++; }
+  }
+  clearTimeout(Chat.timer);
+  Chat.timer = setTimeout(() => pollChat(gen), Chat.quiet < 3 ? 2000 : Chat.quiet < 8 ? 4000 : 8000);
 }
 function connectRoom(room) {
-  Chat.room = room; Chat.last = 0; drawRooms(); $("#msgs").innerHTML = ""; $("#online").textContent = "–";
-  clearInterval(Chat.timer); pollChat(); Chat.timer = setInterval(pollChat, 2000);
+  if (room === "near" && !myCell()) room = "lounge";
+  chatGen++; clearTimeout(Chat.timer);
+  Chat.room = room; Chat.last = 0; Chat.quiet = 0; drawRooms(); $("#msgs").innerHTML = ""; $("#online").textContent = "–";
+  pollChat(chatGen);
 }
 async function sendChat() {
   const inp = $("#chatText"), text = inp.value.trim(); if (!text) return;
   inp.value = "";
-  try { await api("/chat", "POST", { room: Chat.room, text }); pollChat(); } catch (e) { toast(e.message); }
+  try { await api("/chat", "POST", { room: chatSendRoom(), text }); Chat.quiet = 0; clearTimeout(Chat.timer); pollChat(chatGen); } catch (e) { toast(e.message); }
 }
+document.addEventListener("visibilitychange", () => { if (!document.hidden && S.tab === "chat") { Chat.quiet = 0; clearTimeout(Chat.timer); pollChat(chatGen); } });
 
 /* ---------------- Location ---------------- */
 function setLoc(lat, lng, label, sub) {
@@ -454,7 +507,7 @@ function setTab(t) {
   $$("[data-tab]").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === t));
   ["home", "chat", "profile"].forEach(x => $("#tab-" + x).hidden = x !== t);
   if (t === "home" && map) { map.invalidateSize(); if (circle) map.fitBounds(circle.getBounds(), { padding: [10, 10] }); }
-  if (t === "chat") connectRoom(Chat.room); else clearInterval(Chat.timer);
+  if (t === "chat") connectRoom(Chat.room); else { chatGen++; clearTimeout(Chat.timer); }
   if (t === "profile") renderProfile();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -475,6 +528,8 @@ document.addEventListener("click", async e => {
   if (d.star) { rv.stars = +d.star; $$("#dStars button").forEach((b, i) => b.classList.toggle("on", i < rv.stars)); return; }
   if (d.chatplace) { Chat.place = { id: current.id, name: current.name }; Chat.room = "place:" + current.id; $("#detail").hidden = true; setTab("chat"); return; }
   if (d.room) return connectRoom(d.room);
+  if (d.reportmsg) { try { await api(`/chat/${d.reportmsg}/report`, "POST", {}); toast("Reported. It’s hidden for you."); const el = t.closest(".msg"); if (el) el.remove(); } catch (er) { toast(er.message); } return; }
+  if (d.reportphoto) { try { await api(`/photos/${d.reportphoto}/report`, "POST", {}); toast("Reported. Thank you."); const el = t.closest(".gimg"); if (el) el.remove(); } catch (er) { toast(er.message); } return; }
   if (d.auth) return setAuthMode(d.auth);
   if (d.fk) {
     const k = d.fk, v = d.fv;
@@ -513,6 +568,7 @@ document.addEventListener("click", async e => {
     case "gAreaGo": return searchArea();
     case "chatSend": return sendChat();
     case "rPost": return postReview();
+    case "retryPlaces": return fetchPlaces();
     case "pLogout": try { await api("/logout", "POST", {}); } catch (er) { } location.reload(); return;
     case "pClear": if (confirm("Delete your wishlist, visited places and reviews from the database?")) { try { await api("/me/data", "DELETE", {}); db.wish = []; db.visited = []; db.reviews = []; renderProfile(); refreshCounts(); toast("Cleared"); } catch (er) { toast(er.message); } } return;
   }
@@ -526,7 +582,8 @@ document.addEventListener("change", e => {
   const t = e.target;
   if (t.id === "range") { saveProfile(); fetchPlaces(); }
   else if (t.id === "nameInput") { db.profile.name = t.value.trim().slice(0, 24) || "Guest"; $("#pName").textContent = db.profile.name; saveProfile(); }
-  else if (t.id === "rFile" && t.files[0]) shrink(t.files[0], d => { rv.photo = d; $("#rPv").innerHTML = `<img src="${d}" alt="Preview" style="height:44px;border-radius:8px">`; });
+  else if (t.id === "rFile" && t.files[0]) shrink(t.files[0], d => { rv.photo = d; $("#rPv").innerHTML = `<img src="${d}" alt="Preview" style="height:44px;border-radius:8px">`; }, 900, .75);
+  else if (t.id === "pFile" && t.files[0]) { uploadPlacePhoto(t.files[0]); t.value = ""; }
 });
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") { ["filters", "detail"].forEach(i => $("#" + i).hidden = true); if (db.user && db.loc && db.profile.gender && gateStep === 2) $("#gate").hidden = true; }
@@ -539,7 +596,7 @@ document.addEventListener("keydown", e => {
 });
 
 /* ---------------- Boot ---------------- */
-(async function boot() {
+async function boot() {
   $("#range").value = db.profile.range; $("#rangeVal").textContent = fmtDist(db.profile.range);
   setAuthMode("login"); applyTheme(); showLoc();
   if (typeof L === "undefined") { showSetup("The map library (Leaflet) couldn’t load. Check your internet connection and refresh."); return; }
@@ -550,4 +607,5 @@ document.addEventListener("keydown", e => {
   $("#range").value = db.profile.range; $("#rangeVal").textContent = fmtDist(db.profile.range);
   initMap(); applyTheme(); renderProfile(); refreshCounts();
   if (needAuth) showGate(0); else afterLogin();
-})();
+}
+boot().finally(() => { window.__ready = true; });   // lets the intro animation know the app is ready

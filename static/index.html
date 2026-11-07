@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>BREWZA — Find your sip</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E☕%3C/text%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" href="brewza-logo-photo-full.svg">
+<link rel="preload" as="image" href="brewza-logo-photo-full.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,800&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
@@ -12,10 +13,20 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 </head>
 <body data-theme="female">
+<div id="intro">
+  <canvas id="introCanvas"></canvas>
+  <div class="introStage">
+    <div class="introLogo" id="introLogo"><img src="brewza-logo-photo-full.svg" width="156" height="156" alt="BREWZA logo"></div>
+    <div class="introWord" id="introWord"></div>
+    <p class="introTag" id="introTag">Find your sip</p>
+  </div>
+  <p class="introWait" id="introWait" hidden>Warming up the café… the free server can take up to a minute to wake ☕</p>
+  <button class="skip" id="introSkip" type="button" aria-label="Skip intro">Skip ›</button>
+</div>
 <div class="orbs" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 <div class="wrap">
   <header class="top glass">
-    <div class="logo"><div class="cup">☕</div><b>BREWZA</b></div>
+    <div class="logo"><img class="logoimg" src="brewza-logo-photo-full.svg" width="56" height="56" alt=""><b>BREWZA</b></div>
     <nav id="tabs" role="tablist" aria-label="Main sections">
       <button class="tab" role="tab" data-tab="home" aria-selected="true"><span class="ic">🏠</span>Home</button>
       <button class="tab" role="tab" data-tab="chat" aria-selected="false"><span class="ic">💬</span>Live chat</button>
@@ -52,7 +63,7 @@
     <div class="glass chatwrap">
       <div>
         <div class="chips" id="rooms"></div>
-        <p class="muted" style="margin-top:8px"><span id="online">–</span> online in this room · messages are saved · don’t share personal details or exact location</p>
+        <p class="muted" style="margin-top:8px"><span id="online">–</span> online here · Nearby = people within roughly 1–2 km (only a coarse grid square is used, never your exact position) · be kind, don’t share your phone or address, report anything rude (⚑)</p>
         <div class="banner" id="chatBanner" hidden></div>
       </div>
       <div class="msgs" id="msgs" aria-live="polite"></div>
@@ -98,7 +109,8 @@
   <div class="glass gatebox" role="dialog" aria-modal="true" aria-labelledby="gTitle">
     <button class="x" id="gateX" aria-label="Close" hidden>✕</button>
     <div id="gstep0">
-      <h2>Welcome to BREWZA ☕</h2>
+      <img class="gatelogo" src="brewza-logo-photo-full.svg" width="104" height="104" alt="BREWZA logo">
+      <h2>Welcome to BREWZA</h2>
       <p class="muted">Create an account so your wishlist, visited places and reviews are saved in the database.</p>
       <div class="chips" style="margin:12px 0"><button class="chip" data-auth="login" aria-pressed="true">Log in</button><button class="chip" data-auth="signup" aria-pressed="false">Sign up</button></div>
       <label class="f">Username<input type="text" id="aUser" maxlength="24" autocomplete="username" placeholder="letters, numbers, _ or ."></label>
@@ -148,6 +160,7 @@
 
 <div class="toast" id="toast" hidden></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="intro.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

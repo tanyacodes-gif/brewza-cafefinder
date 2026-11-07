@@ -72,3 +72,25 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_chat_room ON chat_messages(room, id);
+
+-- Community photos of places (served from /api/photos/<id>). BLOB keeps lists fast: lists only carry the id.
+CREATE TABLE IF NOT EXISTS photos (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  place_id   TEXT    NOT NULL REFERENCES places(place_id),
+  user_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  data       BLOB    NOT NULL CHECK (length(data) <= 500000),
+  created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_photos_place ON photos(place_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS photo_reports (
+  photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+  user_id  INTEGER NOT NULL REFERENCES users(id)  ON DELETE CASCADE,
+  PRIMARY KEY (photo_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_reports (
+  message_id INTEGER NOT NULL REFERENCES chat_messages(id) ON DELETE CASCADE,
+  user_id    INTEGER NOT NULL REFERENCES users(id)         ON DELETE CASCADE,
+  PRIMARY KEY (message_id, user_id)
+);

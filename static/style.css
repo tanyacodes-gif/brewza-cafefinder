@@ -187,3 +187,59 @@ body[data-theme="male"] .leaflet-control-attribution a{color:#f5c542}
 .pin span{display:grid;place-items:center;width:30px;height:30px;border-radius:50%;border:2px solid #fff;font-size:15px;box-shadow:0 2px 8px rgba(0,0,0,.35)}
 #askOut{margin-top:10px}
 #askOut .rev:last-child{border-bottom:0}
+
+/* ---- photos + chat reporting ---- */
+.thumb{position:relative}
+.thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+.hero{position:relative}
+.hero img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.gallery{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;margin-bottom:6px}
+.gimg{position:relative;flex:0 0 auto}
+.gimg img{width:150px;height:110px;object-fit:cover;border-radius:14px;display:block}
+.gimg button{position:absolute;top:6px;right:6px;border:0;border-radius:99px;background:rgba(0,0,0,.45);color:#fff;width:26px;height:26px;font-size:12px}
+.gadd{flex:0 0 auto;width:150px;height:110px;border:2px dashed var(--edge);border-radius:14px;display:grid;place-items:center;text-align:center;cursor:pointer;color:var(--ink2);font-size:13px}
+.gadd:hover{background:var(--chip)}
+.msg .rep{background:none;border:0;opacity:.45;font-size:11px;padding:0 2px}
+.msg .rep:hover{opacity:1}
+
+/* ---- logo ---- */
+.logoimg{width:56px;height:56px;border-radius:22%;display:block;box-shadow:0 6px 16px rgba(139,111,214,.3)}
+.gatelogo{display:block;margin:0 0 10px;border-radius:24%;box-shadow:0 8px 22px rgba(139,111,214,.3)}
+
+/* ---- intro animation: steam -> BREWZA -> wind ---- */
+#intro{position:fixed;inset:0;z-index:200;display:grid;place-items:center;overflow:hidden;
+  background:radial-gradient(120% 90% at 50% 35%,#fff7ec 0%,#ffe6d2 50%,#f6c7b3 100%);transition:opacity .9s ease,visibility .9s;cursor:pointer}
+#intro.out{opacity:0;visibility:hidden;pointer-events:none}
+#introCanvas{position:absolute;inset:0;width:100%;height:100%}
+.introStage{position:relative;display:flex;flex-direction:column;align-items:center;gap:14px;text-align:center}
+.introLogo{width:156px;height:156px;animation:logoIn 1.1s cubic-bezier(.2,.8,.2,1) backwards;
+  transition:transform 1.5s ease-in,opacity 1.3s ease-in,filter 1.3s ease-in}
+.introLogo svg{width:100%;height:100%;display:block;filter:drop-shadow(0 12px 24px rgba(180,110,80,.35))}
+.introLogo.blow{transform:translate(140px,-24px) rotate(6deg) scale(.92);opacity:0;filter:blur(10px)}
+@keyframes logoIn{from{opacity:0;transform:translateY(14px) scale(.7)}to{opacity:1;transform:none}}
+.introWord{width:1px;height:clamp(70px,19.5vw,195px)}
+.introTag{margin:0;color:#8a5a44;font-family:"DM Sans",system-ui,sans-serif;font-size:14px;letter-spacing:.38em;text-transform:uppercase;
+  opacity:0;transition:opacity 1s ease,transform 1.5s ease-in,filter 1.3s ease-in}
+.introTag.show{opacity:.85}
+.introTag.blow{opacity:0;transform:translateX(170px);filter:blur(6px)}
+.steam{fill:none;stroke:#fff;stroke-width:3.4;stroke-linecap:round;stroke-dasharray:60;animation:steam 2.6s ease-in-out infinite}
+.steam:nth-of-type(2){animation-delay:.5s}.steam:nth-of-type(3){animation-delay:1s}
+@keyframes steam{0%{stroke-dashoffset:60;opacity:0}30%{opacity:.95}70%{opacity:.8}100%{stroke-dashoffset:-60;opacity:0}}
+.skip{position:absolute;top:calc(18px + env(safe-area-inset-top,0px));right:18px;border:1px solid rgba(120,70,50,.25);background:rgba(255,255,255,.5);
+  color:#7b4b36;border-radius:99px;padding:8px 16px;font:inherit;font-size:13px;cursor:pointer}
+.introWait{position:absolute;bottom:calc(46px + env(safe-area-inset-bottom,0px));left:0;right:0;margin:0;padding:0 20px;text-align:center;color:#8a5a44;font-size:14px}
+#intro.waiting .introLogo{animation:pulseLogo 1.6s ease-in-out infinite}
+@keyframes pulseLogo{50%{transform:scale(1.07)}}
+body.intro-on{overflow:hidden}
+@media (prefers-reduced-motion:reduce){#intro{display:none}}
+
+/* ---- logo doodle animation (intro) ---- */
+.introLogo .bobL{animation:bob 2.4s ease-in-out infinite}
+.introLogo .bobR{animation:bob 2.4s ease-in-out infinite -1.2s}
+@keyframes bob{50%{transform:translateY(-3px)}}
+.introLogo .tw{transform-box:fill-box;transform-origin:center;animation:twinkle 1.8s ease-in-out infinite}
+@keyframes twinkle{50%{transform:scale(.55) rotate(20deg);opacity:.6}}
+
+/* ---- logo image in the intro (photo-based logo): gentle float ---- */
+.introLogo img{width:100%;height:100%;display:block;filter:drop-shadow(0 12px 24px rgba(180,110,80,.35));animation:floatLogo 2.6s ease-in-out infinite}
+@keyframes floatLogo{50%{transform:translateY(-4px) rotate(-1deg)}}
